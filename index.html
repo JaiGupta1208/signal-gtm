@@ -10,160 +10,396 @@
   <script src="https://unpkg.com/@babel/standalone@7.26.5/babel.min.js"></script>
 </head>
 <body class="bg-stone-50">
-  <div id="root"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
 
-  <script type="text/babel">
-    const { useState } = React;
-    const EXAMPLES = ["Mutiny", "Rippling", "Notion", "a payroll platform for global teams"];
+const EXAMPLES = ["Mutiny", "Rippling", "Notion", "a payroll platform for global teams"];
 
-    function band(score) {
-      if (score >= 75) return { ring: "text-emerald-600", bar: "bg-emerald-500" };
-      if (score >= 50) return { ring: "text-amber-600", bar: "bg-amber-500" };
-      return { ring: "text-rose-600", bar: "bg-rose-500" };
-    }
+// ── helpers ──────────────────────────────────────────────────────────────────
+function band(score) {
+  if (score >= 75) return { ring: "text-emerald-600", bar: "bg-emerald-500", badge: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+  if (score >= 50) return { ring: "text-amber-600",   bar: "bg-amber-500",   badge: "bg-amber-50 text-amber-700 border-amber-200" };
+  return              { ring: "text-rose-600",   bar: "bg-rose-500",    badge: "bg-rose-50 text-rose-700 border-rose-200" };
+}
 
-    async function callBackend(payload) {
-      const res = await fetch("/api/gemini", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Request failed");
-      return data;
-    }
+async function callGemini(payload) {
+  const res = await fetch("/api/gemini", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Gemini request failed");
+  return data;
+}
 
-    function Signal() {
-      const [company, setCompany] = useState("");
-      const [loading, setLoading] = useState(false);
-      const [result, setResult] = useState(null);
-      const [error, setError] = useState(null);
-      const [drafts, setDrafts] = useState({});
+async function callApollo(payload) {
+  const res = await fetch("/api/apollo", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Apollo request failed");
+  return data;
+}
 
-      async function findFits() {
-        if (!company.trim()) { setError("Enter your company name or domain to start."); return; }
-        setLoading(true); setError(null); setResult(null); setDrafts({});
-        try {
-          const parsed = await callBackend({ action: "find", company });
-          parsed.matches = (parsed.matches || []).sort((a, b) => b.score - a.score);
-          setResult(parsed);
-        } catch (err) {
-          setError("Something went wrong building that list. Try again in a moment.");
-        } finally {
-          setLoading(false);
-        }
-      }
+function gmailLink(to_email, subject, body) {
+  let url = "https://mail.google.com/mail/?view=cm&fs=1";
+  if (to_email) url += "&to=" + encodeURIComponent(to_email);
+  url += "&su=" + encodeURIComponent(subject);
+  url += "&body=" + encodeURIComponent(body);
+  return url;
+}
 
-      async function draftEmail(i, match) {
-        setDrafts((d) => ({ ...d, [i]: { loading: true } }));
-        try {
-          const parsed = await callBackend({
-            action: "draft",
-            company,
-            summary: result.your_company_summary,
-            icp: result.inferred_icp,
-            match,
-          });
-          setDrafts((d) => ({ ...d, [i]: { ...parsed, loading: false } }));
-        } catch (err) {
-          setDrafts((d) => ({ ...d, [i]: { loading: false, error: true } }));
-        }
-      }
+function useLocalStorage(key, init) {
+  const [val, setVal] = useState(() => {
+    try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : init; } catch { return init; }
+  });
+  function save(v) { setVal(v); try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
+  return [val, save];
+}
 
-      function gmailLink(draft) {
-        return "https://mail.google.com/mail/?view=cm&fs=1&su=" +
-          encodeURIComponent(draft.subject) + "&body=" + encodeURIComponent(draft.body);
-      }
-
-      return (
-        <div className="min-h-screen text-stone-900 px-5 py-10 flex justify-center">
-          <div className="w-full max-w-2xl">
-            <div className="mb-8">
-              <div className="text-xs font-mono tracking-[0.25em] text-stone-400 uppercase mb-2">Go-to-market tooling</div>
-              <h1 className="text-3xl font-semibold tracking-tight">Signal</h1>
-              <p className="text-stone-500 mt-1 text-sm">Tell it who you are. It infers who you sell to, finds and scores companies that fit, and drafts a personalized email you can open in Gmail. No ICP, no list, no copywriting required.</p>
+// ── Settings drawer ───────────────────────────────────────────────────────────
+function SettingsDrawer({ open, onClose, apolloKey, setApolloKey, fromEmail, setFromEmail }) {
+  const [localApollo, setLocalApollo] = useState(apolloKey);
+  const [localEmail, setLocalEmail] = useState(fromEmail);
+  function save() { setApolloKey(localApollo.trim()); setFromEmail(localEmail.trim()); onClose(); }
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-end">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white w-full max-w-sm h-full shadow-2xl flex flex-col">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-stone-100">
+          <h2 className="text-sm font-semibold text-stone-900">Connectors</h2>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-lg leading-none">✕</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-mono font-semibold text-stone-500 uppercase tracking-wider">Apollo.io</span>
+              {localApollo ? <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2 py-0.5">Connected</span> : <span className="text-xs bg-stone-100 text-stone-500 rounded-full px-2 py-0.5">Not connected</span>}
             </div>
-
-            <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm">
-              <label className="block text-sm font-medium text-stone-700 mb-1.5">Your company name or domain</label>
-              <input
-                value={company}
-                onChange={(e) => setCompany(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && findFits()}
-                placeholder="e.g. Mutiny, or a one-line description of what you do"
-                className="w-full border border-stone-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-transparent"
-              />
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {EXAMPLES.map((ex) => (
-                  <button key={ex} onClick={() => setCompany(ex)} className="text-xs px-2.5 py-1 rounded-full bg-stone-100 text-stone-600 hover:bg-stone-200 transition">{ex}</button>
-                ))}
-              </div>
-              <button onClick={findFits} disabled={loading} className="w-full mt-4 bg-stone-900 text-white rounded-lg py-3 text-sm font-medium hover:bg-stone-800 transition disabled:opacity-50">
-                {loading ? "Working out your ICP and finding fits..." : "Find companies that fit"}
-              </button>
-              {error && <div className="mt-3 text-sm text-rose-600">{error}</div>}
-            </div>
-
-            {result && (
-              <React.Fragment>
-                <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm mt-5">
-                  <div className="text-xs font-mono tracking-widest uppercase text-stone-400 mb-2">We think you sell to</div>
-                  <p className="text-sm text-stone-800 leading-relaxed">{result.inferred_icp}</p>
-                </div>
-
-                <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm mt-5">
-                  <div className="text-xs font-mono tracking-widest uppercase text-stone-400 mb-4">Companies that fit, ranked</div>
-                  <div className="divide-y divide-stone-100">
-                    {result.matches.map((m, i) => {
-                      const b = band(m.score);
-                      const d = drafts[i];
-                      return (
-                        <div key={i} className="py-4">
-                          <div className="flex items-start gap-4">
-                            <div className={"text-2xl font-semibold tabular-nums w-12 shrink-0 " + b.ring}>{m.score}</div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="text-sm font-medium text-stone-900">{m.company}</div>
-                                <button onClick={() => draftEmail(i, m)} className="text-xs text-stone-500 hover:text-stone-900 transition shrink-0">
-                                  {d?.loading ? "Drafting..." : d?.subject ? "Redraft" : "Draft email"}
-                                </button>
-                              </div>
-                              <div className="text-sm text-stone-500 leading-snug mt-0.5">{m.reason}</div>
-                              <div className="h-1.5 w-full bg-stone-100 rounded-full overflow-hidden mt-2">
-                                <div className={"h-full rounded-full " + b.bar} style={{ width: m.score + "%" }} />
-                              </div>
-                              {d?.error && <div className="text-xs text-rose-600 mt-3">Couldn't draft that one. Try again.</div>}
-                              {d?.subject && (
-                                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 mt-3">
-                                  <div className="text-xs text-stone-400 mb-1">Subject</div>
-                                  <div className="text-sm font-medium text-stone-900 mb-3">{d.subject}</div>
-                                  <div className="text-xs text-stone-400 mb-1">Body</div>
-                                  <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-line">{d.body}</p>
-                                  <div className="flex gap-3 mt-4">
-                                    <a href={gmailLink(d)} target="_blank" rel="noopener noreferrer" className="text-xs bg-stone-900 text-white px-3 py-1.5 rounded-lg hover:bg-stone-800 transition">Open in Gmail</a>
-                                    <button onClick={() => navigator.clipboard?.writeText(d.subject + "\n\n" + d.body)} className="text-xs text-stone-500 hover:text-stone-900 transition">Copy</button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </React.Fragment>
-            )}
-
-            <p className="text-xs text-stone-400 mt-4 leading-relaxed">
-              This version infers the ICP and pulls candidate companies from the model's knowledge, and drafts each email into a Gmail compose window. A production version would connect a live data source (Lusha, ZoomInfo, or ContactOut) to verify companies and pull real contact emails.
-            </p>
+            <p className="text-xs text-stone-400 mb-2">Used to find a real contact at each matched company. Get your API key from Apollo → Settings → Integrations → API.</p>
+            <input
+              type="password"
+              value={localApollo}
+              onChange={e => setLocalApollo(e.target.value)}
+              placeholder="Paste Apollo API key…"
+              className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
+            />
+          </div>
+          <div>
+            <div className="text-xs font-mono font-semibold text-stone-500 uppercase tracking-wider mb-1">Your email address</div>
+            <p className="text-xs text-stone-400 mb-2">Pre-fills the Gmail compose window so replies land in your inbox.</p>
+            <input
+              type="email"
+              value={localEmail}
+              onChange={e => setLocalEmail(e.target.value)}
+              placeholder="you@company.com"
+              className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
+            />
+          </div>
+          <div className="rounded-xl bg-stone-50 border border-stone-100 p-4">
+            <div className="text-xs font-semibold text-stone-700 mb-1">How it works</div>
+            <ol className="text-xs text-stone-500 space-y-1 list-decimal list-inside">
+              <li>Gemini infers your ICP and finds 7 matching companies</li>
+              <li>Apollo pulls a real senior contact at each company</li>
+              <li>Gemini drafts a personalized email to that specific person</li>
+              <li>One click opens Gmail with the email pre-filled and ready to send</li>
+            </ol>
+            <p className="text-xs text-stone-400 mt-3">Keys are stored in your browser only — never sent to any server other than Apollo and Google directly.</p>
           </div>
         </div>
-      );
-    }
+        <div className="px-6 py-4 border-t border-stone-100">
+          <button onClick={save} className="w-full bg-stone-900 text-white rounded-lg py-2.5 text-sm font-medium hover:bg-stone-800 transition">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<Signal />);
-  </script>
+// ── Contact chip ──────────────────────────────────────────────────────────────
+function ContactChip({ contact, loading }) {
+  if (loading) return (
+    <div className="flex items-center gap-2 mt-2">
+      <div className="w-4 h-4 rounded-full bg-stone-200 animate-pulse" />
+      <span className="text-xs text-stone-400">Finding contact…</span>
+    </div>
+  );
+  if (!contact) return (
+    <div className="flex items-center gap-1.5 mt-2">
+      <span className="text-xs text-stone-400">No contact found via Apollo</span>
+    </div>
+  );
+  return (
+    <div className="flex items-center gap-2 mt-2 flex-wrap">
+      <div className="w-6 h-6 rounded-full bg-stone-200 flex items-center justify-center text-xs font-semibold text-stone-600 shrink-0">
+        {(contact.name || "?")[0]}
+      </div>
+      <div className="min-w-0">
+        <span className="text-xs font-medium text-stone-800">{contact.name || "Unknown"}</span>
+        {contact.title && <span className="text-xs text-stone-500"> · {contact.title}</span>}
+        {contact.email
+          ? <span className="ml-1 text-xs text-emerald-600 font-mono">{contact.email}</span>
+          : <span className="ml-1 text-xs text-stone-400 italic">email not revealed</span>}
+      </div>
+      {contact.linkedin && (
+        <a href={contact.linkedin} target="_blank" rel="noopener noreferrer"
+           className="text-xs text-stone-400 hover:text-stone-700 transition shrink-0">↗ LinkedIn</a>
+      )}
+    </div>
+  );
+}
+
+// ── Email draft panel ─────────────────────────────────────────────────────────
+function DraftPanel({ draft, contact, fromEmail, onRedraft }) {
+  if (draft.loading) return (
+    <div className="mt-3 text-xs text-stone-400 animate-pulse">Drafting personalized email…</div>
+  );
+  if (draft.error) return (
+    <div className="mt-3 flex items-center gap-2">
+      <span className="text-xs text-rose-600">Draft failed.</span>
+      <button onClick={onRedraft} className="text-xs underline text-stone-500 hover:text-stone-800">Try again</button>
+    </div>
+  );
+  if (!draft.subject) return null;
+  const toEmail = contact && contact.email ? contact.email : null;
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 mt-3">
+      {contact && contact.name && (
+        <div className="text-xs text-stone-400 mb-2">
+          Personalized for <span className="font-medium text-stone-700">{contact.name}</span>
+          {contact.title && <span> ({contact.title})</span>}
+          {toEmail && <span> · <span className="font-mono">{toEmail}</span></span>}
+        </div>
+      )}
+      <div className="text-xs text-stone-400 mb-0.5">Subject</div>
+      <div className="text-sm font-medium text-stone-900 mb-3">{draft.subject}</div>
+      <div className="text-xs text-stone-400 mb-0.5">Body</div>
+      <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-line">{draft.body}</p>
+      <div className="flex flex-wrap gap-2 mt-4">
+        <a
+          href={gmailLink(toEmail, draft.subject, draft.body)}
+          target="_blank" rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-xs bg-stone-900 text-white px-3 py-1.5 rounded-lg hover:bg-stone-800 transition"
+        >
+          {toEmail ? "✉ Open in Gmail (to " + (contact.name ? contact.name.split(" ")[0] : toEmail) + ")" : "✉ Open in Gmail"}
+        </a>
+        <button
+          onClick={onRedraft}
+          className="text-xs text-stone-500 hover:text-stone-900 transition px-2 py-1.5 rounded-lg border border-stone-200 hover:border-stone-400"
+        >Redraft</button>
+        <button
+          onClick={() => navigator.clipboard?.writeText(draft.subject + "\n\n" + draft.body)}
+          className="text-xs text-stone-500 hover:text-stone-900 transition"
+        >Copy</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+function Signal() {
+  const [company, setCompany] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  // contacts[i] = { loading, contact } or null
+  const [contacts, setContacts] = useState({});
+  // drafts[i] = { loading, subject, body, error } or null
+  const [drafts, setDrafts] = useState({});
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apolloKey, setApolloKey] = useLocalStorage("signal_apollo_key", "");
+  const [fromEmail, setFromEmail] = useLocalStorage("signal_from_email", "");
+
+  async function findFits() {
+    if (!company.trim()) { setError("Enter your company name or domain to start."); return; }
+    setLoading(true); setError(null); setResult(null); setContacts({}); setDrafts({});
+    try {
+      const parsed = await callGemini({ action: "find", company });
+      parsed.matches = (parsed.matches || []).sort((a, b) => b.score - a.score);
+      setResult(parsed);
+      // If Apollo key is set, enrich contacts in parallel
+      if (apolloKey) {
+        fetchAllContacts(parsed.matches, parsed.icp_title_keywords || []);
+      }
+    } catch (err) {
+      setError("Something went wrong building that list. Try again in a moment.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function fetchAllContacts(matches, titleKeywords) {
+    matches.forEach((m, i) => {
+      setContacts(c => ({ ...c, [i]: { loading: true, contact: null } }));
+      callApollo({ company_name: m.company, icp_title_keywords: titleKeywords })
+        .then(data => setContacts(c => ({ ...c, [i]: { loading: false, contact: data.contact } })))
+        .catch(() => setContacts(c => ({ ...c, [i]: { loading: false, contact: null } })));
+    });
+  }
+
+  async function draftEmail(i, match) {
+    setDrafts(d => ({ ...d, [i]: { loading: true } }));
+    const contact = contacts[i] && contacts[i].contact;
+    try {
+      const parsed = await callGemini({
+        action: "draft",
+        company,
+        summary: result.your_company_summary,
+        icp: result.inferred_icp,
+        match,
+        contact,
+      });
+      setDrafts(d => ({ ...d, [i]: { ...parsed, loading: false } }));
+    } catch (err) {
+      setDrafts(d => ({ ...d, [i]: { loading: false, error: true } }));
+    }
+  }
+
+  const hasApollo = !!apolloKey;
+
+  return (
+    <div className="min-h-screen text-stone-900 px-5 py-10 flex justify-center">
+      <SettingsDrawer
+        open={settingsOpen} onClose={() => setSettingsOpen(false)}
+        apolloKey={apolloKey} setApolloKey={setApolloKey}
+        fromEmail={fromEmail} setFromEmail={setFromEmail}
+      />
+      <div className="w-full max-w-2xl">
+
+        {/* Header */}
+        <div className="flex items-start justify-between mb-8">
+          <div>
+            <div className="text-xs font-mono tracking-[0.25em] text-stone-400 uppercase mb-2">Go-to-market tooling</div>
+            <h1 className="text-3xl font-semibold tracking-tight">Signal</h1>
+            <p className="text-stone-500 mt-1 text-sm">Tell it who you are — it infers your ICP, finds companies that fit, surfaces a real contact at each one via Apollo, and drafts a personalized email ready to send.</p>
+          </div>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="shrink-0 mt-1 flex items-center gap-1.5 text-xs text-stone-500 border border-stone-200 rounded-lg px-3 py-1.5 hover:border-stone-400 hover:text-stone-800 transition"
+          >
+            <span>⚙</span>
+            <span>Connectors</span>
+            {hasApollo && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+          </button>
+        </div>
+
+        {/* Search card */}
+        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm">
+          {!hasApollo && (
+            <div className="mb-4 flex items-center gap-2.5 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5">
+              <span className="text-amber-500 text-sm">⚠</span>
+              <p className="text-xs text-amber-800">
+                Apollo not connected — contact enrichment is off.{" "}
+                <button onClick={() => setSettingsOpen(true)} className="underline font-medium hover:text-amber-900">Add key →</button>
+              </p>
+            </div>
+          )}
+          <label className="block text-sm font-medium text-stone-700 mb-1.5">Your company name or domain</label>
+          <input
+            value={company}
+            onChange={e => setCompany(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && findFits()}
+            placeholder="e.g. Mutiny, or a one-line description of what you do"
+            className="w-full border border-stone-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-transparent"
+          />
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {EXAMPLES.map(ex => (
+              <button key={ex} onClick={() => setCompany(ex)}
+                className="text-xs px-2.5 py-1 rounded-full bg-stone-100 text-stone-600 hover:bg-stone-200 transition">{ex}</button>
+            ))}
+          </div>
+          <button onClick={findFits} disabled={loading}
+            className="w-full mt-4 bg-stone-900 text-white rounded-lg py-3 text-sm font-medium hover:bg-stone-800 transition disabled:opacity-50">
+            {loading ? "Working out your ICP and finding fits…" : "Find companies that fit"}
+          </button>
+          {error && <div className="mt-3 text-sm text-rose-600">{error}</div>}
+        </div>
+
+        {/* Results */}
+        {result && (
+          <React.Fragment>
+            {/* ICP summary */}
+            <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm mt-5">
+              <div className="text-xs font-mono tracking-widest uppercase text-stone-400 mb-1">We think you sell to</div>
+              <p className="text-sm text-stone-800 leading-relaxed">{result.inferred_icp}</p>
+              {result.your_company_summary && (
+                <p className="text-xs text-stone-400 mt-2 italic">{result.your_company_summary}</p>
+              )}
+            </div>
+
+            {/* Company list */}
+            <div className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm mt-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-xs font-mono tracking-widest uppercase text-stone-400">Companies that fit, ranked</div>
+                {!hasApollo && (
+                  <button onClick={() => setSettingsOpen(true)}
+                    className="text-xs text-stone-500 border border-stone-200 rounded-full px-2.5 py-1 hover:border-stone-400 transition">
+                    + Connect Apollo for contacts
+                  </button>
+                )}
+              </div>
+              <div className="divide-y divide-stone-100">
+                {result.matches.map((m, i) => {
+                  const b = band(m.score);
+                  const d = drafts[i] || null;
+                  const c = contacts[i] || null;
+                  const contact = c && c.contact;
+                  const contactLoading = c && c.loading;
+                  const hasDraft = d && !d.loading && !d.error && d.subject;
+                  return (
+                    <div key={i} className="py-5">
+                      <div className="flex items-start gap-4">
+                        <div className={"text-2xl font-semibold tabular-nums w-12 shrink-0 " + b.ring}>{m.score}</div>
+                        <div className="flex-1 min-w-0">
+                          {/* Company name + draft button */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-stone-900">{m.company}</div>
+                            <button
+                              onClick={() => draftEmail(i, m)}
+                              disabled={d && d.loading}
+                              className="text-xs text-stone-500 hover:text-stone-900 disabled:opacity-50 transition shrink-0 border border-stone-200 rounded-lg px-2.5 py-1 hover:border-stone-400"
+                            >
+                              {d && d.loading ? "Drafting…" : hasDraft ? "Redraft" : "Draft email"}
+                            </button>
+                          </div>
+                          {/* Reason */}
+                          <div className="text-sm text-stone-500 leading-snug mt-0.5">{m.reason}</div>
+                          {/* Score bar */}
+                          <div className="h-1.5 w-full bg-stone-100 rounded-full overflow-hidden mt-2">
+                            <div className={"h-full rounded-full transition-all " + b.bar} style={{ width: m.score + "%" }} />
+                          </div>
+                          {/* Contact chip (Apollo) */}
+                          {hasApollo && <ContactChip contact={contact} loading={contactLoading} />}
+                          {/* Draft panel */}
+                          {d && (
+                            <DraftPanel
+                              draft={d}
+                              contact={contact}
+                              fromEmail={fromEmail}
+                              onRedraft={() => draftEmail(i, m)}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </React.Fragment>
+        )}
+
+        <p className="text-xs text-stone-400 mt-4 leading-relaxed">
+          Contacts are sourced from Apollo.io. Email drafts are generated by Gemini 2.5 Flash. Neither key ever leaves your browser or Vercel serverless functions — they are never logged or stored.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Signal />);
+</script>
 </body>
 </html>
