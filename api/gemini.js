@@ -1,5 +1,5 @@
-// This runs on Vercel's servers, not in the browser.
-// Your Gemini API key lives here as an environment variable and is never exposed to visitors.
+// api/gemini.js — runs on Vercel's servers, never in the browser.
+// GEMINI_API_KEY lives as a Vercel environment variable.
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -8,10 +8,10 @@ export default async function handler(req, res) {
 
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
-    return res.status(500).json({ error: "The server is missing its GEMINI_API_KEY. Add it in Vercel project settings." });
+    return res.status(500).json({ error: "GEMINI_API_KEY is not set in Vercel environment variables." });
   }
 
-  const { action, company, summary, icp, match } = req.body || {};
+  const { action, company, summary, icp, match, contact } = req.body || {};
 
   let prompt;
 
@@ -19,34 +19,45 @@ export default async function handler(req, res) {
     if (!company || typeof company !== "string" || company.length > 200) {
       return res.status(400).json({ error: "Provide a company name or short description under 200 characters." });
     }
-    prompt = `You are a go-to-market analyst. A company gives you only their own name. Do two things they normally do themselves: infer their ideal customer profile (ICP), then find companies that fit it.
+    prompt = `You are a go-to-market analyst. A company gives you only their own name. Do two things: infer their ideal customer profile (ICP), then find companies that fit it.
 
 The company:
 """${company}"""
 
-Step 1: Infer who this company most likely sells to (industry, size, buyer).
-Step 2: List 7 real, well-known companies that fit. Only companies you are reasonably confident exist. Score each 0 to 100 on fit, with a one-line reason. Sort highest first.
+Step 1: Infer who this company most likely sells to (industry, size, buyer persona — include 3-5 typical job titles of the buyer).
+Step 2: List 7 real, well-known companies that fit. Only companies you are reasonably confident exist. Score each 0-100 on fit, one-line reason. Sort highest first.
 
 Respond with ONLY valid JSON in exactly this shape:
 {
   "your_company_summary": "one sentence on what the input company does",
-  "inferred_icp": "2 to 3 sentences on their likely ideal customer",
+  "inferred_icp": "2-3 sentences on their likely ideal customer",
+  "icp_title_keywords": ["VP Marketing", "Head of Growth", "CMO"],
   "matches": [ { "company": "Name", "score": 0, "reason": "one line" } ]
 }`;
   } else if (action === "draft") {
     if (!match || !match.company) {
       return res.status(400).json({ error: "Missing the company to draft for." });
     }
+    // Use real contact info if available, otherwise write generically
+    const toLine = contact && contact.name
+      ? `${contact.name}${contact.title ? ", " + contact.title : ""} at ${match.company}`
+      : `a senior buyer at ${match.company}`;
+
     prompt = `Write a short, personalized cold outreach email.
 
 From: ${company} (${summary || ""})
-To: a buyer at ${match.company}
+To: ${toLine}
 Why they're a fit: ${match.reason || ""}
-Their likely profile: ${icp || ""}
+Their likely ICP profile: ${icp || ""}
 
-The email should be specific to ${match.company}, under 110 words, no buzzwords, with one clear ask for a short call. Sound human, not like a template.
+Rules:
+- Address ${contact && contact.name ? contact.name.split(" ")[0] : "them"} by first name if known
+- Under 110 words, zero buzzwords
+- One specific insight about ${match.company} that shows you did your homework
+- One clear ask for a 15-minute call
+- Sound like a smart human, not a template
 
-Respond with ONLY valid JSON in exactly this shape:
+Respond with ONLY valid JSON:
 { "subject": "...", "body": "..." }`;
   } else {
     return res.status(400).json({ error: "Unknown action." });
@@ -72,9 +83,7 @@ Respond with ONLY valid JSON in exactly this shape:
     }
 
     const text =
-      (data && data.candidates && data.candidates[0] &&
-        data.candidates[0].content && data.candidates[0].content.parts &&
-        data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || "";
+      (data?.candidates?.[0]?.content?.parts?.[0]?.text) || "";
 
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
@@ -83,4 +92,3 @@ Respond with ONLY valid JSON in exactly this shape:
     return res.status(500).json({ error: "Could not process that request. Please try again." });
   }
 }
-
